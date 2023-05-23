@@ -28,7 +28,7 @@ srun -p $PARTITION \
         --account stablediffusion \
         --output=/fsx/daniel_mend/dataset_experiments/video_mae/VideoMAEv2_old/scripts/logs/videomae-%j.log \
         ${SRUN_ARGS} \
-        python /fsx/daniel_mend/dataset_experiments/video_mae/VideoMAEv2_old/run_mae_pretraining.py \
+        python /fsx/daniel_mend/dataset_experiments/video_mae/VideoMAEv2/run_mae_pretraining.py \
         --data_path ${DATA_PATH} \
         --mask_type tube \
         --mask_ratio 0.9 \

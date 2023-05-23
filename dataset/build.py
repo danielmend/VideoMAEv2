@@ -101,18 +101,23 @@ def custom_collat(samp):
     decode_masked_pos = torch.stack(decode_masked_pos)
 
     return (images, bool_masked_pos, decode_masked_pos)
-'''
+
 class DataLoaderWrapper:
     def __init__(self, dl, num_videos):
         self.dl = dl
         self.num_videos = num_videos
 
     def __iter__(self):
-        return iter(self.dl)
+        self.iterator = iter(self.dl)
+        return self
+
+    def __next__(self):
+        batch = next(self.iterator)
+        return custom_collat(batch)
 
     def __len__(self):
         return self.num_videos
-'''
+
 def custom_transform_v2d(video_frames, new_step, transform, t, new_length, num_sample):
     print("Starting transform", flush=True)
     video_frames_sampled = video_frames[::new_step, :, :, :].permute(0, 3, 1, 2)
@@ -173,24 +178,28 @@ def get_v2d_dl(args):
     dl = get_video_dataset(
         urls=shards,
         decoder_kwargs=decoder_kwargs,
-        batch_size=1,
+        batch_size=args.batch_size,
         resize_size=(360,640),
         enforce_additional_keys=[],
         handler=wds.warn_and_continue,
         custom_transforms=transform_dict,
     )
     #print('THREADS', torch.get_num_threads(), flush=True)
-    torch.set_num_threads(100)
-    print('THREADS', torch.get_num_threads(), flush=True)
-    dl = wds.WebLoader(
-        dl,
-        batch_size=args.batch_size,
-        num_workers=12,
-        collate_fn=custom_collat,
-        pin_memory=True,
-        persistent_workers=True,
-        worker_init_fn=utils.seed_worker
-    ).with_length(args.num_samples_per_worker)
+    #torch.set_num_threads(100)
+    #print('THREADS', torch.get_num_threads(), flush=True)
+    using_webloader = True
+    if using_webloader:
+        dl = wds.WebLoader(
+            dl,
+            batch_size=args.batch_size,
+            num_workers=12,
+            collate_fn=custom_collat,
+            pin_memory=True,
+            persistent_workers=True,
+            worker_init_fn=utils.seed_worker
+        ).with_length(args.num_samples_per_worker)
+    else:
+        dl = DataLoaderWrapper(dl, args.num_samples_per_worker)
 
     print("Data Aug = %s" % str(transform))
     return dl
