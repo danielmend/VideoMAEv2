@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from tensorboardX import SummaryWriter
 from timm.utils import get_state_dict
-from torch._six import inf
+
 from torch.utils.data._utils.collate import default_collate
 
 
@@ -418,7 +418,7 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     if len(parameters) == 0:
         return torch.tensor(0.)
     device = parameters[0].grad.device
-    if norm_type == inf:
+    if norm_type == float('inf'):
         total_norm = max(p.grad.detach().abs().max().to(device)
                          for p in parameters)
     else:

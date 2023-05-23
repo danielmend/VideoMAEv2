@@ -6,22 +6,33 @@
 # https://github.com/facebookresearch/dino
 # --------------------------------------------------------'
 import os
+import subprocess
+from webdataset import WebLoader
 
+import utils
+import torch
 from torchvision import transforms
-
+from braceexpand import braceexpand
 from .datasets import RawFrameClsDataset, VideoClsDataset
 from .masking_generator import (
     RunningCellMaskingGenerator,
     TubeMaskingGenerator,
 )
-from .pretrain_datasets import HybridVideoMAE, VideoMAE  # noqa: F401
+from einops import rearrange
+from .pretrain_datasets import HybridVideoMAE, VideoMAE, Video2DatasetWrapper  # noqa: F401
 from .transforms import (
     GroupMultiScaleCrop,
     GroupNormalize,
     Stack,
     ToTorchFormatTensor,
 )
+from torchvision.transforms import ToPILImage
+from functools import partial
+from utils import multiple_pretrain_samples_collate
 
+import webdataset as wds
+from webdataset import WebLoader
+from video2dataset.dataloader import get_video_dataset
 
 class DataAugmentationForVideoMAEv2(object):
 
@@ -75,9 +86,123 @@ class DataAugmentationForVideoMAEv2(object):
         repr += ")"
         return repr
 
+   
+def custom_collat(samp):
+    uncollated = samp["mp4"]
+    images = []
+    bool_masked_pos = []
+    decode_masked_pos = []
+    for sample in uncollated:
+        images.extend(sample["mp4"])
+        bool_masked_pos.extend(sample["encoder_mask"])
+        decode_masked_pos.extend(sample["decoder_mask"])
+    images = torch.stack(images)
+    bool_masked_pos = torch.stack(bool_masked_pos)
+    decode_masked_pos = torch.stack(decode_masked_pos)
+
+    return (images, bool_masked_pos, decode_masked_pos)
+'''
+class DataLoaderWrapper:
+    def __init__(self, dl, num_videos):
+        self.dl = dl
+        self.num_videos = num_videos
+
+    def __iter__(self):
+        return iter(self.dl)
+
+    def __len__(self):
+        return self.num_videos
+'''
+def custom_transform_v2d(video_frames, new_step, transform, t, new_length, num_sample):
+    print("Starting transform", flush=True)
+    video_frames_sampled = video_frames[::new_step, :, :, :].permute(0, 3, 1, 2)
+    images = [
+        t(tensor) for tensor in video_frames_sampled
+    ]
+    if num_sample > 1:
+        process_data_list = []
+        encoder_mask_list = []
+        decoder_mask_list = []
+        for _ in range(num_sample):
+            process_data, encoder_mask, decoder_mask = transform(
+                (images, None))
+            process_data = process_data.view(
+                (new_length, 3) + process_data.size()[-2:]).transpose(
+                    0, 1)
+            process_data_list.append(process_data)
+            encoder_mask_list.append(encoder_mask)
+            decoder_mask_list.append(decoder_mask)
+        out_batch = [[process_data_list, encoder_mask_list, decoder_mask_list]]
+    else:
+        process_data, encoder_mask, decoder_mask = transform(
+            (images, None)
+        )
+        # T*C,H,W -> T,C,H,W -> C,T,H,W
+        process_data = process_data.view(
+            (new_length, 3) + process_data.size()[-2:]).transpose(
+                0, 1)
+        out_batch = [[process_data, encoder_mask, decoder_mask]]
+    batch = multiple_pretrain_samples_collate(out_batch, fold=False)
+    print("Transform finished", flush=True)
+    return {
+        'mp4': batch[0],
+        'encoder_mask': batch[1],
+        'decoder_mask': batch[2]
+    }
+
+def get_v2d_dl(args):
+    transform = DataAugmentationForVideoMAEv2(args)
+    shards = args.data_path
+    
+    decoder_kwargs = {
+        'n_frames': args.num_frames*args.sampling_rate,
+        'fps': None,
+        'num_threads': 4
+    }
+    t = ToPILImage()
+    transform_dict = {
+        'mp4': partial(
+            custom_transform_v2d, 
+            transform=transform, 
+            num_sample=args.num_sample, 
+            new_length=args.num_frames,
+            new_step=args.sampling_rate,
+            t=t
+        )
+    }
+    dl = get_video_dataset(
+        urls=shards,
+        decoder_kwargs=decoder_kwargs,
+        batch_size=1,
+        resize_size=(360,640),
+        enforce_additional_keys=[],
+        handler=wds.warn_and_continue,
+        custom_transforms=transform_dict,
+    )
+    #print('THREADS', torch.get_num_threads(), flush=True)
+    torch.set_num_threads(100)
+    print('THREADS', torch.get_num_threads(), flush=True)
+    dl = wds.WebLoader(
+        dl,
+        batch_size=args.batch_size,
+        num_workers=12,
+        collate_fn=custom_collat,
+        pin_memory=True,
+        persistent_workers=True,
+        worker_init_fn=utils.seed_worker
+    ).with_length(args.num_samples_per_worker)
+
+    print("Data Aug = %s" % str(transform))
+    return dl
 
 def build_pretraining_dataset(args):
+    if args.use_video2dataset:
+        dataset = get_v2d_dl(args)
+        return dataset
+
     transform = DataAugmentationForVideoMAEv2(args)
+    print("Data Aug = %s" % str(transform))
+    
     dataset = VideoMAE(
         root=args.data_root,
         setting=args.data_path,
@@ -95,7 +220,6 @@ def build_pretraining_dataset(args):
         temporal_jitter=False,
         lazy_init=False,
         num_sample=args.num_sample)
-    print("Data Aug = %s" % str(transform))
     return dataset
 
 

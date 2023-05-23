@@ -243,6 +243,8 @@ def get_args():
         help='number of distributed processes')
     parser.add_argument('--local_rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
+    parser.add_argument('--use_video2dataset', action="store_true", default=False)
+    parser.add_argument('--train_num_samples', default=-1, type=int)
     parser.add_argument(
         '--dist_url',
         default='env://',
@@ -269,7 +271,7 @@ def get_model(args):
 def main(args):
     utils.init_distributed_mode(args)
 
-    print(args)
+    print(args, flush=True)
 
     device = torch.device(args.device)
 
@@ -282,47 +284,51 @@ def main(args):
 
     model = get_model(args)
     patch_size = model.encoder.patch_embed.patch_size
-    print("Patch size = %s" % str(patch_size))
+    print("Patch size = %s" % str(patch_size), flush=True)
     args.window_size = (args.num_frames // args.tubelet_size,
                         args.input_size // patch_size[0],
                         args.input_size // patch_size[1])
     args.patch_size = patch_size
 
-    # get dataset
-    dataset_train = build_pretraining_dataset(args)
-
     num_tasks = utils.get_world_size()
     global_rank = utils.get_rank()
     sampler_rank = global_rank
     total_batch_size = args.batch_size * num_tasks
-
-    num_training_steps_per_epoch = len(dataset_train) // total_batch_size
-
-    sampler_train = torch.utils.data.DistributedSampler(
-        dataset_train, num_replicas=num_tasks, rank=sampler_rank, shuffle=True)
-    print("Sampler_train = %s" % str(sampler_train))
-
+    args.global_rank = global_rank
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
         log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
     else:
         log_writer = None
-
-    if args.num_sample > 1:
-        collate_func = partial(multiple_pretrain_samples_collate, fold=False)
+    # get dataset
+    if args.use_video2dataset:
+        num_training_steps_per_epoch = args.train_num_samples // total_batch_size
+        args.num_samples_per_worker = num_training_steps_per_epoch
+        data_loader_train = build_pretraining_dataset(args)
     else:
-        collate_func = None
+        dataset_train = build_pretraining_dataset(args)
+        num_training_steps_per_epoch = len(dataset_train) // total_batch_size
 
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train,
-        sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-        collate_fn=collate_func,
-        worker_init_fn=utils.seed_worker,
-        persistent_workers=True)
+        sampler_train = torch.utils.data.DistributedSampler(
+            dataset_train, num_replicas=num_tasks, rank=sampler_rank, shuffle=True)
+        print("Sampler_train = %s" % str(sampler_train))
+
+        if args.num_sample > 1:
+            collate_func = partial(multiple_pretrain_samples_collate, fold=False)
+        else:
+            collate_func = None
+
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset_train,
+            sampler=sampler_train,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+            collate_fn=collate_func,
+            worker_init_fn=utils.seed_worker,
+            persistent_workers=True
+        )
 
     if args.finetune:
         checkpoint = torch.load(args.finetune, map_location='cpu')
@@ -394,10 +400,11 @@ def main(args):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
+        if args.distributed and not args.use_video2dataset:
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch)
+        print("Yo", flush=True)
         train_stats = train_one_epoch(
             model,
             data_loader_train,

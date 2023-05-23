@@ -6,7 +6,65 @@ import torch
 from PIL import Image
 
 from .loader import get_image_loader, get_video_loader
+from video2dataset.dataloader import get_video_dataset
+from torchvision.transforms import ToPILImage
+from utils import multiple_pretrain_samples_collate
 
+class Video2DatasetWrapper:
+    def __init__(self, dl, num_samples, transform, new_length, new_step, num_sample):
+        self.dl = dl
+        self.num_samples = num_samples
+        self.transform = transform
+        self.new_length = new_length
+        self.new_step = new_step
+        self.num_sample = num_sample
+        self.iterable = iter(self.dl)
+        self.t = ToPILImage()
+
+    def __len__(self):
+        return self.num_samples
+
+    def __next__(self):
+        print("Yo v2", flush=True)
+        try:
+            sample = next(self.iterable)
+        except StopIteration:
+            raise StopIteration("All samples have been retrieved")
+        print("Yo v3", flush=True)
+        video_frames = sample['mp4']
+        out_batch = [] # todo: figure out collat function they use
+        for video in video_frames:
+            video_frames_sampled = video[::self.new_step, :, :, :].permute(0, 3, 1, 2)
+            images = [
+                self.t(tensor) for tensor in video_frames_sampled
+            ]
+            if self.num_sample > 1:
+                process_data_list = []
+                encoder_mask_list = []
+                decoder_mask_list = []
+                for _ in range(self.num_sample):
+                    process_data, encoder_mask, decoder_mask = self.transform(
+                        (images, None))
+                    process_data = process_data.view(
+                        (self.new_length, 3) + process_data.size()[-2:]).transpose(
+                            0, 1)
+                    process_data_list.append(process_data)
+                    encoder_mask_list.append(encoder_mask)
+                    decoder_mask_list.append(decoder_mask)
+                out_batch.append([process_data_list, encoder_mask_list, decoder_mask_list])
+            else:
+                process_data, encoder_mask, decoder_mask = self.transform(
+                    (images, None)
+                )
+                # T*C,H,W -> T,C,H,W -> C,T,H,W
+                process_data = process_data.view(
+                    (self.new_length, 3) + process_data.size()[-2:]).transpose(
+                        0, 1)
+                out_batch.append([process_data, encoder_mask, decoder_mask])
+        return multiple_pretrain_samples_collate(out_batch)
+
+    def __iter__(self):
+        return self
 
 class HybridVideoMAE(torch.utils.data.Dataset):
     """Load your own videomae pretraining dataset.

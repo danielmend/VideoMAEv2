@@ -8,7 +8,7 @@
 import math
 import sys
 from typing import Iterable
-
+import time
 import torch
 from einops import rearrange
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -37,10 +37,13 @@ def train_one_epoch(model: torch.nn.Module,
     metric_logger.add_meter(
         'min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 20
-
+    print_freq = 2
+    t = time.time()
+    total_t = 0
+    num_samples = 0
     for step, batch in enumerate(
             metric_logger.log_every(data_loader, print_freq, header)):
+            
         # assign learning rate & weight decay for each step
         it = start_steps + step  # global training iteration
         if lr_schedule_values is not None or wd_schedule_values is not None:
@@ -55,8 +58,9 @@ def train_one_epoch(model: torch.nn.Module,
         # NOTE: When the decoder mask ratio is 0,
         # in other words, when decoder masking is not used,
         # decode_masked_pos = ~bool_masked_pos
-        images, bool_masked_pos, decode_masked_pos = batch
 
+        images, bool_masked_pos, decode_masked_pos = batch
+        
         images = images.to(device, non_blocking=True)
         bool_masked_pos = bool_masked_pos.to(
             device, non_blocking=True).flatten(1).to(torch.bool)
@@ -172,6 +176,12 @@ def train_one_epoch(model: torch.nn.Module,
 
         if lr_scheduler is not None:
             lr_scheduler.step_update(start_steps + step)
+        total_t += time.time()-t
+        num_samples += len(images)*8 # change to world size
+        print(f'Time for batch: {time.time()-t}', flush=True)
+        print(f'Total samples: {len(images)*8}', flush=True)
+        print(f'Samples/s: {num_samples/total_t}', flush=True)
+        t = time.time()
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
